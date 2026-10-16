@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.local/
+dist/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.exe
+__pycache__/
+*.py[cod]
+.DS_Store

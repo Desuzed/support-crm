@@ -1,0 +1,469 @@
+diff --git a/README.md b/README.md
+index 59fb63d..98ef06b 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,7 @@
+ - MCP для локального проекта, GitHub, Яндекс Диска, погоды и новостей.
+ - `/help <вопрос>`: ответ о проекте по документации.
+ - `/diff`: текущая локальная git-ветка через MCP без генерации ответа.
++- Отдельный [Project MCP для внешнего сервиса поддержки](docs/support-service.md): RAG, документы и состояние проекта без запуска основного чата.
+ - Автоматическое AI-ревью PR: отдельная команда `cmd/prreview`, RAG по документации и коду, GitHub Action с публикацией текстового ревью.
+ - Планировщик задачи с явными переходами, паузой и возобновлением.
+ - Отдельные режимы сравнения формата ответа, рассуждений и параметров генерации.
+diff --git a/cmd/supportmcp/main.go b/cmd/supportmcp/main.go
+new file mode 100644
+index 0000000..b47fde9
+--- /dev/null
++++ b/cmd/supportmcp/main.go
+@@ -0,0 +1,41 @@
++package main
++
++import (
++	"flag"
++	"log"
++	"net/http"
++	"os"
++	"path/filepath"
++	"time"
++
++	"ai-challenge-app/internal/rag"
++	"ai-challenge-app/internal/ragindex"
++	"ai-challenge-app/internal/supportmcp"
++)
++
++func main() {
++	root := flag.String("root", ".", "project root")
++	addr := flag.String("addr", "127.0.0.1:8091", "listen address; use an SSH tunnel for remote access")
++	flag.Parse()
++	abs, err := filepath.Abs(*root)
++	if err != nil {
++		log.Fatal(err)
++	}
++	url := os.Getenv("SUPPORT_EMBEDDING_URL")
++	if url == "" {
++		url = "http://127.0.0.1:11434"
++	}
++	model := os.Getenv("SUPPORT_EMBEDDING_MODEL")
++	if model == "" {
++		model = "embeddinggemma"
++	}
++	h, err := supportmcp.Handler(supportmcp.Config{Root: abs, Token: os.Getenv("SUPPORT_MCP_TOKEN"), DeepSeekConfigured: os.Getenv("DEEPSEEK_API_KEY") != "", GitHubConfigured: os.Getenv("GITHUB_TOKEN") != "", Retriever: &rag.Searcher{Root: abs, IndexDir: filepath.Join(abs, ".local/rag"), Model: model, Embedder: ragindex.Ollama{URL: url, Model: model, KeepAlive: "0"}}})
++	if err != nil {
++		log.Fatal(err)
++	}
++	mux := http.NewServeMux()
++	mux.Handle("/mcp", h)
++	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
++	log.Printf("Project knowledge MCP listening on %s (generation: external support service)", *addr)
++	log.Fatal(server.ListenAndServe())
++}
+diff --git a/docs/support-service.md b/docs/support-service.md
+new file mode 100644
+index 0000000..2479f95
+--- /dev/null
++++ b/docs/support-service.md
+@@ -0,0 +1,54 @@
++# Отдельный сервис поддержки
++
++Project Desk — самостоятельная CRM и AI-ассистент для пользователей `ai-challenge-app`. Он хранит пользователей, обращения и переписку в собственной SQLite и генерирует ответы через DeepSeek. Сервис не использует основную историю диалога приложения и не требует запуска его веб-сервера.
++
++## Доступ к знаниям проекта
++
++В этом репозитории добавлена отдельная команда:
++
++```sh
++export SUPPORT_MCP_TOKEN='случайная строка не короче 32 символов'
++go run ./cmd/supportmcp -root . -addr 127.0.0.1:8091
++```
++
++Она предоставляет MCP по Streamable HTTP на `/mcp` и требует Bearer-токен. Команда запускается отдельным процессом. Модель ответа находится в сервисе поддержки; на стороне проекта нужны только существующий индекс и сервис эмбеддингов.
++
++| Инструмент | Результат |
++|---|---|
++| `project_search_docs` | Поиск по существующему RAG, тексты фрагментов и их ID |
++| `project_read_document` | Чтение README или разрешённого документа из docs без зависимости от индекса |
++| `project_get_info` | Ветка, commit, время проверки, состояние индекса, модель эмбеддингов и признаки настройки ключей окружения процесса |
++
++Поиск возвращает только разрешённые документы и Go-исходники из индекса. Чтение `.env`, `.local`, произвольных путей, выход за корень и символьные ссылки в документах запрещены. MCP не предоставляет запись файлов, выполнение произвольных команд, изменение тикетов или доступ к основной истории чата.
++
++`SUPPORT_EMBEDDING_URL` задаёт адрес Ollama для эмбеддингов; по умолчанию `http://127.0.0.1:11434`. `SUPPORT_EMBEDDING_MODEL` по умолчанию равен `embeddinggemma` и должен совпадать с индексом. Генеративная локальная модель этому MCP-сервису не нужна.
++
++Индекс проверяется по исходным файлам проекта. При изменениях выполните штатную переиндексацию. Внешний ассистент различает `index_missing`, `index_stale`, `embedding_unavailable` и чтение документов напрямую. Признаки ключей описывают только окружение процесса MCP и не доказывают авторизацию провайдера.
++
++## Текущее размещение: CRM на VPS, RAG на Mac
++
++После переноса Project Desk на Linux VPS там работают интерфейс CRM, собственный CRM MCP, SQLite с пользователями, тикетами и перепиской, а также клиент DeepSeek API. Служба `projectdesk.service` запускается автоматически. Резервные копии SQLite создаются ежедневно, сохраняются последние 14 снимков. Генерация ответа выполняется DeepSeek API, локальная генеративная модель на VPS не требуется.
++
++На Mac остаются исходный проект, документация, RAG-индекс, Project MCP и сервис эмбеддингов `embeddinggemma`. Mac создаёт обратный SSH-туннель: `127.0.0.1:18091` на VPS предоставляет доступ к Project MCP на Mac (`127.0.0.1:8091`). CRM слушает `127.0.0.1:8090` на VPS. Браузер на Mac открывает этот интерфейс через собственный SSH-forward по адресу `http://127.0.0.1:8090`.
++
++Windows после переноса используется только как дополнительный клиент. Задача `ProjectDeskVPSAccess` автоматически создаёт SSH-forward к CRM на VPS. Старая Windows-задача `ProjectDeskSupport` отключена, локальный процесс `support-crm.exe` остановлен; прежняя база сохранена для отката. Windows можно выключить: это не останавливает CRM на VPS и не разрывает соединение VPS с Mac. На Mac интерфейс остаётся доступен через его собственный туннель. Для доступа с Windows сам Windows-ПК, естественно, должен быть включён.
++
++Mac должен оставаться включённым и доступным для ответов по RAG. Работа основного веб-сервера `ai-challenge-app` для Project MCP не требуется. CRM на VPS продолжает хранить пользователей, обращения и переписку при недоступности Mac, но ассистент не получает актуальные знания проекта.
++
++Токены и ключи хранятся в приватной конфигурации, не в репозитории. Порты CRM, MCP и Ollama остаются внутренними; при доступе через SSH-forward публичный домен не нужен. Для отдельного доступа по домену требуется настроить HTTPS и маршрутизацию на VPS с учётом уже работающих служб.
++
++## Проверка RAG, MCP и контекста обращения
++
++Под ответом Project Desk показывает «Источники и точные цитаты»: документ или тикет, ID источника и использованную цитату. Пометка RAG означает успешный поиск по индексу. Резервное прямое чтение документов помечается отдельно.
++
++«Журнал MCP» содержит фактические вызовы инструментов с аргументами, результатами, временем и ошибками. Для вопроса по тикету видны `crm_get_ticket`, `crm_get_user`, сохранение вопроса через `crm_add_message`, `project_get_info`, `project_search_docs` и сохранение ответа через `crm_add_message`. Общий вопрос без тикета не требует чтения тикета и пользователя. Журнал записывается MCP-клиентом, а не генерируется моделью. Секреты скрываются, большие результаты сокращаются с явной отметкой.
++
++Внутри журнала «Контекст, подготовленный для DeepSeek» показывает ID тикета, число предыдущих сообщений пользователя и оператора и перечень переданных источников. Данные пользователя, описание, окружение и переписка своего тикета могут влиять на ответ. Истории разных тикетов разделены. Переписка тикета, ответ, источники и журнал сохраняются в SQLite и видны после обновления страницы. Общий чат хранится только в открытой вкладке.
++
++В карточке рядом со статусом есть кнопка «Удалить обращение». После подтверждения CRM удаляет тикет, всю его переписку, источники и журнал MCP. Пользователь и другие обращения сохраняются. «Отмена» оставляет карточку и черновик без изменений. Пока по этому тикету готовится ответ, удаление заблокировано. Восстановления удалённого обращения через интерфейс нет.
++
++## Вариант размещения CRM на Windows
++
++Для локальной установки CRM также поддерживается Windows вместо VPS: на Windows работает `support-crm.exe` и SQLite, а Mac предоставляет Project MCP и RAG через SSH-туннель. В этом варианте Windows нужен для работы CRM. После описанного выше переноса на VPS Windows нужен только как клиент.
++
++Если Mac или туннель недоступен, CRM сохраняет обращения и переписку, но не сообщает, что получила актуальные знания проекта. Если остановлен только основной веб-сервер `ai-challenge-app`, Project MCP продолжает работать.
+diff --git a/internal/supportmcp/server.go b/internal/supportmcp/server.go
+new file mode 100644
+index 0000000..9631b39
+--- /dev/null
++++ b/internal/supportmcp/server.go
+@@ -0,0 +1,218 @@
++// Package supportmcp exposes project knowledge independently of the web app.
++package supportmcp
++
++import (
++	"context"
++	"crypto/sha256"
++	"crypto/subtle"
++	"encoding/hex"
++	"errors"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"ai-challenge-app/internal/rag"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++type Retriever interface {
++	SearchWithOptions(context.Context, string, rag.SearchOptions) (rag.SearchResult, error)
++	IndexInfo() (rag.IndexInfo, error)
++}
++
++type Config struct {
++	Root      string
++	Token     string
++	Retriever Retriever
++	// Values are loaded by the executable. Only presence flags are returned.
++	DeepSeekConfigured bool
++	GitHubConfigured   bool
++}
++
++type Evidence struct {
++	ID      string  `json:"id"`
++	Source  string  `json:"source"`
++	Section string  `json:"section,omitempty"`
++	Text    string  `json:"text"`
++	Score   float64 `json:"score,omitempty"`
++}
++
++type SearchResult struct {
++	Mode     string     `json:"mode"`
++	Evidence []Evidence `json:"evidence"`
++}
++
++type Info struct {
++	Project            string `json:"project"`
++	Branch             string `json:"branch,omitempty"`
++	Commit             string `json:"commit,omitempty"`
++	CapturedAt         string `json:"capturedAt"`
++	IndexStatus        string `json:"indexStatus"`
++	EmbeddingModel     string `json:"embeddingModel,omitempty"`
++	Files              int    `json:"files"`
++	Chunks             int    `json:"chunks"`
++	DeepSeekConfigured bool   `json:"deepseekConfigured"`
++	GitHubConfigured   bool   `json:"githubConfigured"`
++}
++
++func Handler(cfg Config) (http.Handler, error) {
++	if len(cfg.Token) < 32 {
++		return nil, errors.New("SUPPORT_MCP_TOKEN must contain at least 32 characters")
++	}
++	root, err := filepath.Abs(cfg.Root)
++	if err != nil {
++		return nil, err
++	}
++	cfg.Root = root
++	if _, err := os.Stat(filepath.Join(root, "README.md")); err != nil {
++		return nil, errors.New("project README.md not found")
++	}
++	s := mcp.NewServer(&mcp.Implementation{Name: "ai-challenge-project-knowledge", Version: "1.0.0"}, nil)
++	no := false
++	annotation := &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &no, OpenWorldHint: &no}
++	mcp.AddTool(s, &mcp.Tool{Name: "project_search_docs", Description: "Search the existing project RAG index. Returns exact source text and evidence IDs. No secrets or CRM data.", Annotations: annotation}, func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
++		Question string `json:"question"`
++		Limit    int    `json:"limit,omitempty"`
++	}) (*mcp.CallToolResult, SearchResult, error) {
++		if len(strings.TrimSpace(in.Question)) == 0 || len(in.Question) > 8000 {
++			return nil, SearchResult{}, errors.New("question must contain 1–8000 bytes")
++		}
++		if cfg.Retriever == nil {
++			return nil, SearchResult{}, errors.New("RAG is not configured")
++		}
++		options := rag.DefaultSearchOptions()
++		options.ResultLimit = min(6, max(1, in.Limit))
++		options.CandidateLimit = max(12, options.ResultLimit)
++		q := strings.ToLower(in.Question)
++		options.ProjectOverview = strings.Contains(q, "расскажи о проекте") || strings.Contains(q, "что это за проект")
++		ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
++		defer cancel()
++		result, err := cfg.Retriever.SearchWithOptions(ctx, in.Question, options)
++		if err != nil {
++			return nil, SearchResult{}, safeRAGError(err)
++		}
++		out := SearchResult{Mode: "rag", Evidence: []Evidence{}}
++		for _, match := range result.Matches {
++			// An index is data, not permission to read arbitrary paths.
++			if !allowedSource(match.Chunk.Source) {
++				continue
++			}
++			out.Evidence = append(out.Evidence, Evidence{ID: match.Chunk.ChunkID, Source: match.Chunk.Source, Section: match.Chunk.Section, Text: match.Chunk.Text, Score: match.Score})
++		}
++		return nil, out, nil
++	})
++	mcp.AddTool(s, &mcp.Tool{Name: "project_read_document", Description: "Read README.md or a UTF-8 document under docs. Useful when the RAG index itself is unavailable. Never reads env, history, reports or credentials.", Annotations: annotation}, func(_ context.Context, _ *mcp.CallToolRequest, in struct {
++		Path string `json:"path"`
++	}) (*mcp.CallToolResult, Evidence, error) {
++		out, err := readDocument(root, in.Path)
++		return nil, out, err
++	})
++	mcp.AddTool(s, &mcp.Tool{Name: "project_get_info", Description: "Current project revision and actual RAG index health. Credential flags expose presence only. Does not test external provider connectivity.", Annotations: annotation}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, Info, error) {
++		out := Info{Project: "ai-challenge-app", CapturedAt: time.Now().UTC().Format(time.RFC3339), IndexStatus: "not_configured", DeepSeekConfigured: cfg.DeepSeekConfigured, GitHubConfigured: cfg.GitHubConfigured}
++		out.Branch = git(ctx, root, "branch", "--show-current")
++		out.Commit = git(ctx, root, "rev-parse", "HEAD")
++		if cfg.Retriever != nil {
++			info, err := cfg.Retriever.IndexInfo()
++			if err != nil {
++				out.IndexStatus = safeRAGError(err).Error()
++			} else {
++				out.IndexStatus = "ready"
++				out.EmbeddingModel = info.Model
++				out.Files = info.Files
++				out.Chunks = info.Chunks
++			}
++		}
++		return nil, out, nil
++	})
++	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 64 << 10})
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Cache-Control", "no-store")
++		if r.Header.Get("Origin") != "" {
++			http.Error(w, "browser access is not supported", http.StatusForbidden)
++			return
++		}
++		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
++			http.Error(w, "unauthorized", http.StatusUnauthorized)
++			return
++		}
++		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
++		if subtle.ConstantTimeCompare([]byte(auth), []byte(cfg.Token)) != 1 {
++			http.Error(w, "unauthorized", http.StatusUnauthorized)
++			return
++		}
++		transport.ServeHTTP(w, r)
++	}), nil
++}
++
++func allowedSource(p string) bool {
++	if strings.Contains(p, "\\") || strings.Contains(p, "..") || filepath.IsAbs(p) {
++		return false
++	}
++	if p == "README.md" {
++		return true
++	}
++	if strings.HasPrefix(p, "docs/") {
++		switch filepath.Ext(p) {
++		case ".md", ".txt", ".json", ".yaml", ".yml":
++			return true
++		}
++	}
++	return strings.HasPrefix(p, "internal/") && strings.HasSuffix(p, ".go") || p == "main.go"
++}
++
++func readDocument(root, p string) (Evidence, error) {
++	if !allowedSource(p) || !(p == "README.md" || strings.HasPrefix(p, "docs/")) {
++		return Evidence{}, errors.New("document is outside the allowed corpus")
++	}
++	path := filepath.Join(root, filepath.FromSlash(p))
++	real, err := filepath.EvalSymlinks(path)
++	if err != nil {
++		return Evidence{}, errors.New("document not found")
++	}
++	base, err := filepath.EvalSymlinks(root)
++	if err != nil {
++		return Evidence{}, errors.New("project root unavailable")
++	}
++	rel, err := filepath.Rel(base, real)
++	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
++		return Evidence{}, errors.New("document escapes project root")
++	}
++	if filepath.Clean(rel) != filepath.Clean(filepath.FromSlash(p)) {
++		return Evidence{}, errors.New("symbolic links are not allowed in documents")
++	}
++	data, err := os.ReadFile(real)
++	if err != nil {
++		return Evidence{}, errors.New("document cannot be read")
++	}
++	if len(data) > 64<<10 {
++		return Evidence{}, errors.New("document exceeds 64 KiB")
++	}
++	hash := sha256.Sum256(data)
++	return Evidence{ID: "document:" + p + ":" + hex.EncodeToString(hash[:8]), Source: p, Text: string(data)}, nil
++}
++
++func safeRAGError(err error) error {
++	switch {
++	case errors.Is(err, rag.ErrIndexMissing):
++		return errors.New("index_missing")
++	case errors.Is(err, rag.ErrIndexStale):
++		return errors.New("index_stale")
++	case errors.Is(err, rag.ErrEmbeddingUnavailable):
++		return errors.New("embedding_unavailable")
++	default:
++		return errors.New("rag_unavailable")
++	}
++}
++
++func git(ctx context.Context, root string, args ...string) string {
++	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
++	defer cancel()
++	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...).Output()
++	if err != nil {
++		return ""
++	}
++	return strings.TrimSpace(string(out))
++}
+diff --git a/internal/supportmcp/server_test.go b/internal/supportmcp/server_test.go
+new file mode 100644
+index 0000000..106e157
+--- /dev/null
++++ b/internal/supportmcp/server_test.go
+@@ -0,0 +1,120 @@
++package supportmcp
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"ai-challenge-app/internal/rag"
++	"ai-challenge-app/internal/ragindex"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++type stubRetriever struct{ err error }
++
++func (s stubRetriever) IndexInfo() (rag.IndexInfo, error) {
++	return rag.IndexInfo{Model: "embeddinggemma", Files: 1, Chunks: 1}, s.err
++}
++func (s stubRetriever) SearchWithOptions(context.Context, string, rag.SearchOptions) (rag.SearchResult, error) {
++	return rag.SearchResult{Matches: []rag.Match{{Chunk: ragindex.Chunk{Source: "README.md", ChunkID: "readme-1", Text: "Project documentation"}}, {Chunk: ragindex.Chunk{Source: ".env", ChunkID: "secret", Text: "SECRET"}}}}, s.err
++}
++
++type authRT struct{ token string }
++
++func (a authRT) RoundTrip(r *http.Request) (*http.Response, error) {
++	r = r.Clone(r.Context())
++	r.Header.Set("Authorization", "Bearer "+a.token)
++	return http.DefaultTransport.RoundTrip(r)
++}
++func projectRoot(t *testing.T) string {
++	t.Helper()
++	root := t.TempDir()
++	if err := os.Mkdir(filepath.Join(root, "docs"), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("Project docs"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	return root
++}
++func TestMCPProtocolAndCorpusIsolation(t *testing.T) {
++	root := projectRoot(t)
++	token := strings.Repeat("a", 40)
++	h, err := Handler(Config{Root: root, Token: token, Retriever: stubRetriever{}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := httptest.NewServer(h)
++	defer server.Close()
++	res, err := http.Get(server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res.Body.Close()
++	if res.StatusCode != 401 {
++		t.Fatalf("missing token: %d", res.StatusCode)
++	}
++	ctx := context.Background()
++	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: &http.Client{Transport: authRT{token}}, DisableStandaloneSSE: true}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer session.Close()
++	list, err := session.ListTools(ctx, nil)
++	if err != nil || len(list.Tools) != 3 {
++		t.Fatalf("tools: %v %v", list, err)
++	}
++	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "project_search_docs", Arguments: map[string]any{"question": "project documentation", "limit": 4}})
++	if err != nil || result.IsError {
++		t.Fatalf("call: %v %v", result, err)
++	}
++	data, _ := json.Marshal(result.StructuredContent)
++	var found SearchResult
++	if json.Unmarshal(data, &found) != nil || len(found.Evidence) != 1 || found.Evidence[0].Source != "README.md" {
++		t.Fatalf("corpus leak: %s", data)
++	}
++	result, err = session.CallTool(ctx, &mcp.CallToolParams{Name: "project_read_document", Arguments: map[string]string{"path": ".env"}})
++	if err != nil || !result.IsError {
++		t.Fatalf("secret read was allowed: %v %v", result, err)
++	}
++	req, _ := http.NewRequest("GET", server.URL, nil)
++	req.Header.Set("Authorization", "Bearer "+token)
++	req.Header.Set("Origin", "http://evil.invalid")
++	res, err = http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res.Body.Close()
++	if res.StatusCode != 403 {
++		t.Fatal("browser origin accepted")
++	}
++}
++func TestReadDocumentRejectsTraversalAndSymlinks(t *testing.T) {
++	root := projectRoot(t)
++	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("SECRET"), 0600)
++	if err := os.Symlink(filepath.Join(root, ".env"), filepath.Join(root, "docs", "leak.md")); err != nil {
++		t.Fatal(err)
++	}
++	for _, p := range []string{"../README.md", "docs/../.env", ".env", "docs/leak.md", "/etc/passwd", "docs\\file.md"} {
++		if _, err := readDocument(root, p); err == nil {
++			t.Errorf("accepted %q", p)
++		}
++	}
++	doc, err := readDocument(root, "README.md")
++	if err != nil || doc.Text != "Project docs" {
++		t.Fatalf("read: %v %v", doc, err)
++	}
++}
++func TestStaleIndexHasSafeDiagnostic(t *testing.T) {
++	if safeRAGError(rag.ErrIndexStale).Error() != "index_stale" {
++		t.Fatal("wrong status")
++	}
++	if _, err := Handler(Config{Root: projectRoot(t), Token: "short"}); err == nil {
++		t.Fatal("weak token accepted")
++	}
++}
