@@ -1,0 +1,6 @@
+# Replace the hostname and merge this block into the server's existing Caddyfile.
+# CRM and MCP ports stay bound to localhost.
+support.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8090
+}

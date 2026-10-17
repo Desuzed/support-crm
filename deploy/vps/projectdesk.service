@@ -1,0 +1,28 @@
+[Unit]
+Description=Project Desk Support CRM
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=projectdesk
+Group=projectdesk
+WorkingDirectory=/var/lib/projectdesk
+EnvironmentFile=/etc/projectdesk/crm.env
+ExecStart=/opt/projectdesk/support-crm
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+StateDirectory=projectdesk
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
