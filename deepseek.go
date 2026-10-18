@@ -31,7 +31,7 @@ func (d *DeepSeek) Generate(ctx context.Context, messages []ModelMessage) (strin
 	if strings.TrimSpace(d.Key) == "" {
 		return "", errors.New("deepseek_key_missing")
 	}
-	body, err := json.Marshal(map[string]any{"model": d.Model, "messages": messages, "thinking": map[string]string{"type": "disabled"}, "temperature": 0.2, "max_tokens": 2800, "response_format": map[string]string{"type": "json_object"}, "stream": false})
+	body, err := json.Marshal(map[string]any{"model": d.Model, "messages": messages, "thinking": map[string]string{"type": "disabled"}, "temperature": 0.2, "max_tokens": 6000, "response_format": map[string]string{"type": "json_object"}, "stream": false})
 	if err != nil {
 		return "", err
 	}

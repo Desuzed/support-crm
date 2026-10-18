@@ -12,7 +12,7 @@ index 59fb63d..98ef06b 100644
  - Отдельные режимы сравнения формата ответа, рассуждений и параметров генерации.
 diff --git a/cmd/supportmcp/main.go b/cmd/supportmcp/main.go
 new file mode 100644
-index 0000000..b47fde9
+index 0000000..4b4295a
 --- /dev/null
 +++ b/cmd/supportmcp/main.go
 @@ -0,0 +1,41 @@
@@ -47,7 +47,7 @@ index 0000000..b47fde9
 +	if model == "" {
 +		model = "embeddinggemma"
 +	}
-+	h, err := supportmcp.Handler(supportmcp.Config{Root: abs, Token: os.Getenv("SUPPORT_MCP_TOKEN"), DeepSeekConfigured: os.Getenv("DEEPSEEK_API_KEY") != "", GitHubConfigured: os.Getenv("GITHUB_TOKEN") != "", Retriever: &rag.Searcher{Root: abs, IndexDir: filepath.Join(abs, ".local/rag"), Model: model, Embedder: ragindex.Ollama{URL: url, Model: model, KeepAlive: "0"}}})
++	h, err := supportmcp.Handler(supportmcp.Config{Root: abs, FilesRoot: os.Getenv("SUPPORT_FILES_ROOT"), Token: os.Getenv("SUPPORT_MCP_TOKEN"), DeepSeekConfigured: os.Getenv("DEEPSEEK_API_KEY") != "", GitHubConfigured: os.Getenv("GITHUB_TOKEN") != "", Retriever: &rag.Searcher{Root: abs, IndexDir: filepath.Join(abs, ".local/rag"), Model: model, Embedder: ragindex.Ollama{URL: url, Model: model, KeepAlive: "0"}}})
 +	if err != nil {
 +		log.Fatal(err)
 +	}
@@ -59,10 +59,10 @@ index 0000000..b47fde9
 +}
 diff --git a/docs/support-service.md b/docs/support-service.md
 new file mode 100644
-index 0000000..2479f95
+index 0000000..cb23f2a
 --- /dev/null
 +++ b/docs/support-service.md
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,74 @@
 +# Отдельный сервис поддержки
 +
 +Project Desk — самостоятельная CRM и AI-ассистент для пользователей `ai-challenge-app`. Он хранит пользователей, обращения и переписку в собственной SQLite и генерирует ответы через DeepSeek. Сервис не использует основную историю диалога приложения и не требует запуска его веб-сервера.
@@ -83,8 +83,28 @@ index 0000000..2479f95
 +| `project_search_docs` | Поиск по существующему RAG, тексты фрагментов и их ID |
 +| `project_read_document` | Чтение README или разрешённого документа из docs без зависимости от индекса |
 +| `project_get_info` | Ветка, commit, время проверки, состояние индекса, модель эмбеддингов и признаки настройки ключей окружения процесса |
++| `project_list_files` | Публичные исходники и документы рабочего каталога, с пагинацией |
++| `project_search_files` | Поиск по текущим файлам независимо от RAG; пути и строки |
++| `project_read_file` | Чтение диапазона строк и SHA256 файла |
++| `project_write_file` | Сохранение Markdown-документа с SHA256-проверкой и diff |
++| `project_preview_diff` | Diff документа без сохранения |
 +
-+Поиск возвращает только разрешённые документы и Go-исходники из индекса. Чтение `.env`, `.local`, произвольных путей, выход за корень и символьные ссылки в документах запрещены. MCP не предоставляет запись файлов, выполнение произвольных команд, изменение тикетов или доступ к основной истории чата.
++Поиск RAG возвращает только разрешённые документы и Go-исходники из индекса.
++Файловый рабочий каталог задаётся `SUPPORT_FILES_ROOT` (по умолчанию `-root`).
++Для Project Desk обёртка на Mac указывает корень `ai-challenge-app`: ассистент
++в интерфейсе CRM изучает код и сохраняет документацию этого основного проекта.
++Файловые инструменты и RAG относятся к одному проекту. `project_get_info` возвращает `fileToolsVersion: 1`
++и имя файлового каталога в `fileWorkspace`.
++
++Чтение `.env`, `.local`, скрытых/приватных каталогов, сборок, произвольных путей,
++выход за корень и символьные ссылки запрещены. Файловый IO ограничен `os.Root`.
++Доступны публичные UTF-8 исходники и документы до 512 КиБ, включая большой файл агента. Сохранение ограничено
++README.md, CHANGELOG.md и `.md` внутри docs до 32 КиБ: `expectedSha256` должен
++совпадать с текущим файлом, для создания используется `missing`. Конфликт даёт
++`file_conflict`; одинаковое содержимое не переписывается. Предпросмотр выполняет
++те же проверки без записи. Запись публикуется через временный файл и переименование.
++MCP не предоставляет выполнение команд, изменение исходного кода, тикетов
++или доступ к основной истории чата.
 +
 +`SUPPORT_EMBEDDING_URL` задаёт адрес Ollama для эмбеддингов; по умолчанию `http://127.0.0.1:11434`. `SUPPORT_EMBEDDING_MODEL` по умолчанию равен `embeddinggemma` и должен совпадать с индексом. Генеративная локальная модель этому MCP-сервису не нужна.
 +
@@ -119,10 +139,10 @@ index 0000000..2479f95
 +Если Mac или туннель недоступен, CRM сохраняет обращения и переписку, но не сообщает, что получила актуальные знания проекта. Если остановлен только основной веб-сервер `ai-challenge-app`, Project MCP продолжает работать.
 diff --git a/internal/supportmcp/server.go b/internal/supportmcp/server.go
 new file mode 100644
-index 0000000..9631b39
+index 0000000..85b8484
 --- /dev/null
 +++ b/internal/supportmcp/server.go
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,229 @@
 +// Package supportmcp exposes project knowledge independently of the web app.
 +package supportmcp
 +
@@ -150,6 +170,7 @@ index 0000000..9631b39
 +
 +type Config struct {
 +	Root      string
++	FilesRoot string // Optional workspace for file tools; defaults to Root.
 +	Token     string
 +	Retriever Retriever
 +	// Values are loaded by the executable. Only presence flags are returned.
@@ -171,6 +192,8 @@ index 0000000..9631b39
 +}
 +
 +type Info struct {
++	FileToolsVersion   int    `json:"fileToolsVersion"`
++	FileWorkspace      string `json:"fileWorkspace"`
 +	Project            string `json:"project"`
 +	Branch             string `json:"branch,omitempty"`
 +	Commit             string `json:"commit,omitempty"`
@@ -198,6 +221,14 @@ index 0000000..9631b39
 +	s := mcp.NewServer(&mcp.Implementation{Name: "ai-challenge-project-knowledge", Version: "1.0.0"}, nil)
 +	no := false
 +	annotation := &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &no, OpenWorldHint: &no}
++	if cfg.FilesRoot == "" {
++		cfg.FilesRoot = root
++	}
++	workspace, err := newWorkspace(cfg.FilesRoot)
++	if err != nil {
++		return nil, err
++	}
++	registerFileTools(s, workspace, annotation)
 +	mcp.AddTool(s, &mcp.Tool{Name: "project_search_docs", Description: "Search the existing project RAG index. Returns exact source text and evidence IDs. No secrets or CRM data.", Annotations: annotation}, func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
 +		Question string `json:"question"`
 +		Limit    int    `json:"limit,omitempty"`
@@ -236,7 +267,7 @@ index 0000000..9631b39
 +		return nil, out, err
 +	})
 +	mcp.AddTool(s, &mcp.Tool{Name: "project_get_info", Description: "Current project revision and actual RAG index health. Credential flags expose presence only. Does not test external provider connectivity.", Annotations: annotation}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, Info, error) {
-+		out := Info{Project: "ai-challenge-app", CapturedAt: time.Now().UTC().Format(time.RFC3339), IndexStatus: "not_configured", DeepSeekConfigured: cfg.DeepSeekConfigured, GitHubConfigured: cfg.GitHubConfigured}
++		out := Info{FileToolsVersion: 1, FileWorkspace: filepath.Base(cfg.FilesRoot), Project: "ai-challenge-app", CapturedAt: time.Now().UTC().Format(time.RFC3339), IndexStatus: "not_configured", DeepSeekConfigured: cfg.DeepSeekConfigured, GitHubConfigured: cfg.GitHubConfigured}
 +		out.Branch = git(ctx, root, "branch", "--show-current")
 +		out.Commit = git(ctx, root, "rev-parse", "HEAD")
 +		if cfg.Retriever != nil {
@@ -252,7 +283,7 @@ index 0000000..9631b39
 +		}
 +		return nil, out, nil
 +	})
-+	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 64 << 10})
++	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 256 << 10})
 +	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		w.Header().Set("Cache-Control", "no-store")
 +		if r.Header.Get("Origin") != "" {
@@ -343,7 +374,7 @@ index 0000000..9631b39
 +}
 diff --git a/internal/supportmcp/server_test.go b/internal/supportmcp/server_test.go
 new file mode 100644
-index 0000000..106e157
+index 0000000..5d14d96
 --- /dev/null
 +++ b/internal/supportmcp/server_test.go
 @@ -0,0 +1,120 @@
@@ -415,7 +446,7 @@ index 0000000..106e157
 +	}
 +	defer session.Close()
 +	list, err := session.ListTools(ctx, nil)
-+	if err != nil || len(list.Tools) != 3 {
++	if err != nil || len(list.Tools) != 8 {
 +		t.Fatalf("tools: %v %v", list, err)
 +	}
 +	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "project_search_docs", Arguments: map[string]any{"question": "project documentation", "limit": 4}})
@@ -465,5 +496,613 @@ index 0000000..106e157
 +	}
 +	if _, err := Handler(Config{Root: projectRoot(t), Token: "short"}); err == nil {
 +		t.Fatal("weak token accepted")
++	}
++}
+diff --git a/internal/supportmcp/files.go b/internal/supportmcp/files.go
+new file mode 100644
+index 0000000..2d61248
+--- /dev/null
++++ b/internal/supportmcp/files.go
+@@ -0,0 +1,418 @@
++package supportmcp
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"io/fs"
++	"os"
++	"path"
++	"path/filepath"
++	"strings"
++	"sync"
++	"unicode/utf8"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++const fileLimit = 512 << 10
++const documentLimit = 32 << 10
++
++// The workspace has no command execution tool. A root handle confines all IO,
++// including concurrent path replacement, to the configured workspace.
++type workspace struct {
++	dir string
++	mu  sync.Mutex
++}
++
++func newWorkspace(dir string) (*workspace, error) {
++	abs, err := filepath.Abs(dir)
++	if err != nil {
++		return nil, errors.New("file workspace unavailable")
++	}
++	r, err := os.OpenRoot(abs)
++	if err != nil {
++		return nil, errors.New("file workspace unavailable")
++	}
++	r.Close()
++	return &workspace{dir: abs}, nil
++}
++
++type fileListInput struct {
++	Prefix string `json:"prefix,omitempty"`
++	Offset int    `json:"offset,omitempty"`
++	Limit  int    `json:"limit,omitempty"`
++}
++type fileList struct {
++	Files      []string `json:"files"`
++	NextOffset int      `json:"nextOffset,omitempty"`
++	Truncated  bool     `json:"truncated"`
++}
++type fileSearchInput struct {
++	Query  string `json:"query"`
++	Prefix string `json:"prefix,omitempty"`
++	Offset int    `json:"offset,omitempty"`
++	Limit  int    `json:"limit,omitempty"`
++}
++type fileReadInput struct {
++	Path      string `json:"path"`
++	StartLine int    `json:"startLine,omitempty"`
++	Limit     int    `json:"limit,omitempty"`
++}
++type fileRead struct {
++	Evidence
++	SHA256     string `json:"sha256"`
++	StartLine  int    `json:"startLine"`
++	EndLine    int    `json:"endLine"`
++	TotalLines int    `json:"totalLines"`
++	Truncated  bool   `json:"truncated"`
++}
++type fileSearch struct {
++	Evidence     []Evidence `json:"evidence"`
++	NextOffset   int        `json:"nextOffset,omitempty"`
++	Truncated    bool       `json:"truncated"`
++	SkippedFiles int        `json:"skippedFiles"`
++}
++type fileWriteInput struct {
++	Path           string `json:"path"`
++	Content        string `json:"content"`
++	ExpectedSHA256 string `json:"expectedSha256"`
++}
++type fileWrite struct {
++	Path    string `json:"path"`
++	Changed bool   `json:"changed"`
++	Saved   bool   `json:"saved"`
++	SHA256  string `json:"sha256"`
++	Diff    string `json:"diff"`
++}
++
++func registerFileTools(s *mcp.Server, w *workspace, readOnly *mcp.ToolAnnotations) {
++	mcp.AddTool(s, &mcp.Tool{Name: "project_list_files", Description: "List public source and documentation paths in fileWorkspace, sorted, with pagination. Hidden/private/generated files and symlinks are excluded. prefix is a literal path prefix.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, in fileListInput) (*mcp.CallToolResult, fileList, error) {
++		out, err := w.list(ctx, in)
++		return nil, out, err
++	})
++	mcp.AddTool(s, &mcp.Tool{Name: "project_search_files", Description: "Case-insensitive literal search in current files, independent of RAG. Returns path:line references and exact matching lines. Follow nextOffset while truncated; skippedFiles counts oversized/unreadable files.", Annotations: readOnly}, func(ctx context.Context, _ *mcp.CallToolRequest, in fileSearchInput) (*mcp.CallToolResult, fileSearch, error) {
++		out, err := w.search(ctx, in)
++		return nil, out, err
++	})
++	mcp.AddTool(s, &mcp.Tool{Name: "project_read_file", Description: "Read current UTF-8 source/documentation in fileWorkspace, with SHA256 of the entire file. Lines are 1-based, default limit 160, maximum 240; read subsequent ranges if truncated.", Annotations: readOnly}, func(_ context.Context, _ *mcp.CallToolRequest, in fileReadInput) (*mcp.CallToolResult, fileRead, error) {
++		out, err := w.read(in)
++		return nil, out, err
++	})
++	no := false
++	mcp.AddTool(s, &mcp.Tool{Name: "project_write_file", Description: "Save README.md, CHANGELOG.md or Markdown under docs in fileWorkspace, max 32 KiB; returns actual unified diff. expectedSha256 MUST be the hash from project_read_file, or missing for a new file. An unchanged write is a no-op. Only use when the user requests a saved change.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &no, OpenWorldHint: &no}}, func(_ context.Context, _ *mcp.CallToolRequest, in fileWriteInput) (*mcp.CallToolResult, fileWrite, error) {
++		out, err := w.write(in, true)
++		return nil, out, err
++	})
++	mcp.AddTool(s, &mcp.Tool{Name: "project_preview_diff", Description: "Preview a unified diff using the same arguments and conflict checks as project_write_file, without saving. Use when the user asks only to propose or review a change.", Annotations: readOnly}, func(_ context.Context, _ *mcp.CallToolRequest, in fileWriteInput) (*mcp.CallToolResult, fileWrite, error) {
++		out, err := w.write(in, false)
++		return nil, out, err
++	})
++}
++
++func allowedFile(p string) bool {
++	if p == "" || strings.ContainsAny(p, "\\:\x00") || strings.HasPrefix(p, "/") || path.Clean(p) != p {
++		return false
++	}
++	for _, part := range strings.Split(p, "/") {
++		if strings.HasPrefix(part, ".") {
++			return false
++		}
++		switch strings.ToLower(part) {
++		case "node_modules", "vendor", "dist", "build", "coverage", "data", "storage", "secrets", "credentials", "private", "venv", "__pycache__":
++			return false
++		}
++	}
++	switch strings.ToLower(path.Ext(p)) {
++	case ".go", ".js", ".ts", ".tsx", ".jsx", ".md", ".css", ".html", ".json", ".yaml", ".yml", ".toml", ".txt", ".sh", ".py", ".ps1", ".sql", ".mod":
++		return true
++	}
++	return false
++}
++
++func writableDocument(p string) bool {
++	return allowedFile(p) && (p == "README.md" || p == "CHANGELOG.md" || strings.HasPrefix(p, "docs/") && strings.HasSuffix(p, ".md"))
++}
++
++func checkPath(r *os.Root, p string) error {
++	if !allowedFile(p) {
++		return errors.New("file is outside the allowed workspace corpus")
++	}
++	parts := strings.Split(p, "/")
++	for i := range parts {
++		info, err := r.Lstat(strings.Join(parts[:i+1], "/"))
++		if errors.Is(err, fs.ErrNotExist) {
++			return nil
++		}
++		if err != nil || info.Mode()&os.ModeSymlink != 0 {
++			return errors.New("symlinks and inaccessible paths are not allowed")
++		}
++		if i == len(parts)-1 && !info.Mode().IsRegular() {
++			return errors.New("only regular files are allowed")
++		}
++	}
++	return nil
++}
++
++func readText(r *os.Root, p string) ([]byte, error) {
++	if err := checkPath(r, p); err != nil {
++		return nil, err
++	}
++	f, err := r.Open(p)
++	if errors.Is(err, fs.ErrNotExist) {
++		return nil, fs.ErrNotExist
++	}
++	if err != nil {
++		return nil, errors.New("file cannot be opened")
++	}
++	defer f.Close()
++	info, err := f.Stat()
++	if err != nil || !info.Mode().IsRegular() {
++		return nil, errors.New("only regular files are allowed")
++	}
++	data, err := io.ReadAll(io.LimitReader(f, fileLimit+1))
++	if err != nil || len(data) > fileLimit || !utf8.Valid(data) || strings.ContainsRune(string(data), '\x00') {
++		return nil, errors.New("file is not UTF-8 text within 512 KiB")
++	}
++	return data, nil
++}
++
++func digest(data []byte) string { hash := sha256.Sum256(data); return hex.EncodeToString(hash[:]) }
++
++func (w *workspace) list(ctx context.Context, in fileListInput) (fileList, error) {
++	out := fileList{Files: []string{}}
++	if in.Offset < 0 || in.Offset > 100000 || len(in.Prefix) > 256 {
++		return out, errors.New("invalid pagination or prefix")
++	}
++	r, err := os.OpenRoot(w.dir)
++	if err != nil {
++		return out, errors.New("workspace unavailable")
++	}
++	defer r.Close()
++	limit := min(200, max(1, in.Limit))
++	if in.Limit == 0 {
++		limit = 80
++	}
++	matched := 0
++	err = fs.WalkDir(r.FS(), ".", func(p string, d fs.DirEntry, walkErr error) error {
++		if ctx.Err() != nil {
++			return ctx.Err()
++		}
++		if walkErr != nil {
++			return walkErr
++		}
++		if d.IsDir() {
++			if p != "." && !allowedFile(p+"/probe.go") {
++				return fs.SkipDir
++			}
++			return nil
++		}
++		if d.Type()&os.ModeSymlink != 0 || !allowedFile(p) || !strings.HasPrefix(p, in.Prefix) {
++			return nil
++		}
++		matched++
++		if matched <= in.Offset {
++			return nil
++		}
++		if len(out.Files) == limit {
++			out.Truncated = true
++			out.NextOffset = in.Offset + len(out.Files)
++			return fs.SkipAll
++		}
++		out.Files = append(out.Files, p)
++		return nil
++	})
++	return out, err
++}
++
++func (w *workspace) read(in fileReadInput) (fileRead, error) {
++	r, err := os.OpenRoot(w.dir)
++	if err != nil {
++		return fileRead{}, errors.New("workspace unavailable")
++	}
++	defer r.Close()
++	data, err := readText(r, in.Path)
++	if err != nil {
++		return fileRead{}, err
++	}
++	lines := strings.Split(string(data), "\n")
++	start := max(1, in.StartLine)
++	limit := 160
++	if in.Limit != 0 {
++		limit = min(240, max(1, in.Limit))
++	}
++	if start > len(lines) {
++		return fileRead{}, errors.New("startLine is beyond end of file")
++	}
++	end := min(len(lines), start-1+limit)
++	// Bound each response even for minified files.
++	text := strings.Join(lines[start-1:end], "\n")
++	if len(text) > 32<<10 {
++		return fileRead{}, errors.New("selected lines exceed 32 KiB; request a smaller range")
++	}
++	hash := digest(data)
++	return fileRead{Evidence: Evidence{ID: fmt.Sprintf("file:%s:%s:%d-%d", in.Path, hash[:16], start, end), Source: fmt.Sprintf("%s:%d-%d", in.Path, start, end), Text: text}, SHA256: hash, StartLine: start, EndLine: end, TotalLines: len(lines), Truncated: end < len(lines)}, nil
++}
++
++func (w *workspace) search(ctx context.Context, in fileSearchInput) (fileSearch, error) {
++	out := fileSearch{Evidence: []Evidence{}}
++	if strings.TrimSpace(in.Query) == "" || len(in.Query) > 200 || in.Offset < 0 || in.Offset > 100000 {
++		return out, errors.New("invalid query or offset")
++	}
++	r, err := os.OpenRoot(w.dir)
++	if err != nil {
++		return out, errors.New("workspace unavailable")
++	}
++	defer r.Close()
++	limit := 40
++	if in.Limit != 0 {
++		limit = min(80, max(1, in.Limit))
++	}
++	matched := 0
++	for offset := 0; ; {
++		files, err := w.list(ctx, fileListInput{Prefix: in.Prefix, Offset: offset, Limit: 200})
++		if err != nil {
++			return out, err
++		}
++		for _, p := range files.Files {
++			if ctx.Err() != nil {
++				return out, ctx.Err()
++			}
++			data, err := readText(r, p)
++			if err != nil {
++				out.SkippedFiles++
++				continue
++			}
++			hash := digest(data)
++			for line, text := range strings.Split(string(data), "\n") {
++				if !strings.Contains(strings.ToLower(text), strings.ToLower(in.Query)) {
++					continue
++				}
++				matched++
++				if matched <= in.Offset {
++					continue
++				}
++				if len(out.Evidence) == limit {
++					out.Truncated = true
++					out.NextOffset = in.Offset + len(out.Evidence)
++					return out, nil
++				}
++				if len(text) > 2000 {
++					text = string([]rune(text)[:min(500, len([]rune(text)))])
++				}
++				out.Evidence = append(out.Evidence, Evidence{ID: fmt.Sprintf("match:%s:%s:%d", p, hash[:16], line+1), Source: fmt.Sprintf("%s:%d", p, line+1), Text: text})
++			}
++		}
++		if !files.Truncated {
++			break
++		}
++		offset = files.NextOffset
++	}
++	return out, nil
++}
++
++func (w *workspace) write(in fileWriteInput, save bool) (fileWrite, error) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	out := fileWrite{Path: in.Path}
++	if !writableDocument(in.Path) {
++		return out, errors.New("writes are limited to README.md, CHANGELOG.md and docs/*.md")
++	}
++	if len(in.Content) > documentLimit || !utf8.ValidString(in.Content) || strings.ContainsRune(in.Content, '\x00') {
++		return out, errors.New("document must be UTF-8 text within 32 KiB")
++	}
++	r, err := os.OpenRoot(w.dir)
++	if err != nil {
++		return out, errors.New("workspace unavailable")
++	}
++	defer r.Close()
++	before, err := readText(r, in.Path)
++	missing := errors.Is(err, fs.ErrNotExist)
++	if err != nil && !missing {
++		return out, err
++	}
++	if missing && in.ExpectedSHA256 != "missing" || !missing && in.ExpectedSHA256 != digest(before) {
++		return out, errors.New("file_conflict: read current file and use its sha256, or missing for a new file")
++	}
++	if len(before) > documentLimit {
++		return out, errors.New("existing document exceeds 32 KiB")
++	}
++	after := []byte(in.Content)
++	out.SHA256 = digest(after)
++	out.Changed = missing || string(before) != in.Content
++	if out.Changed {
++		out.Diff = unifiedDiff(in.Path, string(before), in.Content, missing)
++	}
++	if !save {
++		return out, nil
++	}
++	if out.Changed {
++		if err = r.MkdirAll(path.Dir(in.Path), 0755); err != nil {
++			return out, errors.New("document directory cannot be created")
++		}
++		tmp := path.Join(path.Dir(in.Path), ".assistant-"+out.SHA256[:16]+".tmp")
++		f, err := r.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
++		if err != nil {
++			return out, errors.New("temporary document cannot be created")
++		}
++		defer r.Remove(tmp)
++		_, err = f.Write(after)
++		if err == nil {
++			err = f.Sync()
++		}
++		closeErr := f.Close()
++		if err != nil || closeErr != nil {
++			return out, errors.New("document cannot be saved")
++		}
++		// Recheck immediately before publishing, preserving changes made during IO.
++		current, currentErr := readText(r, in.Path)
++		if missing && !errors.Is(currentErr, fs.ErrNotExist) || !missing && (currentErr != nil || digest(current) != in.ExpectedSHA256) {
++			return out, errors.New("file_conflict: file changed while preparing the write")
++		}
++		if err = r.Rename(tmp, in.Path); err != nil {
++			return out, errors.New("document cannot be replaced")
++		}
++	}
++	out.Saved = true
++	return out, nil
++}
++
++// A full-file hunk keeps diffs deterministic and valid without a subprocess.
++func unifiedDiff(p, before, after string, missing bool) string {
++	oldPath := "a/" + p
++	if missing {
++		oldPath = "/dev/null"
++	}
++	lines := func(s string) []string {
++		if s == "" {
++			return nil
++		}
++		return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
++	}
++	old, new := lines(before), lines(after)
++	oldStart, newStart := 1, 1
++	if len(old) == 0 {
++		oldStart = 0
++	}
++	if len(new) == 0 {
++		newStart = 0
++	}
++	var b strings.Builder
++	fmt.Fprintf(&b, "--- %s\n+++ b/%s\n@@ -%d,%d +%d,%d @@\n", oldPath, p, oldStart, len(old), newStart, len(new))
++	for i, line := range old {
++		b.WriteString("-" + line + "\n")
++		if i == len(old)-1 && !strings.HasSuffix(before, "\n") {
++			b.WriteString("\\ No newline at end of file\n")
++		}
++	}
++	for i, line := range new {
++		b.WriteString("+" + line + "\n")
++		if i == len(new)-1 && !strings.HasSuffix(after, "\n") {
++			b.WriteString("\\ No newline at end of file\n")
++		}
++	}
++	return b.String()
++}
+diff --git a/internal/supportmcp/files_test.go b/internal/supportmcp/files_test.go
+new file mode 100644
+index 0000000..338636a
+--- /dev/null
++++ b/internal/supportmcp/files_test.go
+@@ -0,0 +1,178 @@
++package supportmcp
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++func fileFixture(t *testing.T) (*workspace, string) {
++	t.Helper()
++	root := projectRoot(t)
++	for name, content := range map[string]string{"main.go": "package main\nfunc authenticate() {}\n", "web/app.js": "fetch('/api/chat');\n", "tools.go": "package main\n// authenticate reads a token\n", ".env": "SECRET_TOKEN=never-return-this", "docs/current.md": "Existing documentation\n"} {
++		p := filepath.Join(root, name)
++		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	w, err := newWorkspace(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return w, root
++}
++
++func TestCurrentFileSearchAndPaginatedReads(t *testing.T) {
++	w, root := fileFixture(t)
++	out, err := w.search(context.Background(), fileSearchInput{Query: "AUTHENTICATE", Limit: 1})
++	if err != nil || len(out.Evidence) != 1 || !out.Truncated || out.NextOffset != 1 {
++		t.Fatalf("page 1: %+v %v", out, err)
++	}
++	next, err := w.search(context.Background(), fileSearchInput{Query: "AUTHENTICATE", Limit: 1, Offset: out.NextOffset})
++	if err != nil || len(next.Evidence) != 1 || next.Truncated || next.Evidence[0].Source == out.Evidence[0].Source {
++		t.Fatalf("page 2: %+v %v", next, err)
++	}
++	doc, err := w.read(fileReadInput{Path: "main.go", Limit: 1})
++	if err != nil || !doc.Truncated || doc.StartLine != 1 || doc.EndLine != 1 {
++		t.Fatalf("read: %+v %v", doc, err)
++	}
++	_ = os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n// changed\n"), 0600)
++	newDoc, err := w.read(fileReadInput{Path: "main.go"})
++	if err != nil || doc.SHA256 == newDoc.SHA256 {
++		t.Fatal("reading stale content")
++	}
++}
++
++func TestLargeProjectSourceIsSearchableAndReadableByRange(t *testing.T) {
++	w, root := fileFixture(t)
++	text := strings.Repeat("// project context\n", 10000) + "func trimWindowLocked() {}\n"
++	if len(text) <= 128<<10 {
++		t.Fatal("fixture must cover the size of ai-challenge-app's agent source")
++	}
++	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(text), 0600); err != nil {
++		t.Fatal(err)
++	}
++	found, err := w.search(context.Background(), fileSearchInput{Query: "trimWindowLocked"})
++	if err != nil || found.SkippedFiles != 0 || len(found.Evidence) != 1 {
++		t.Fatalf("large source search: %+v %v", found, err)
++	}
++	doc, err := w.read(fileReadInput{Path: "main.go", StartLine: 10001, Limit: 1})
++	if err != nil || doc.Text != "func trimWindowLocked() {}" || doc.SHA256 != digest([]byte(text)) {
++		t.Fatalf("large source read: %+v %v", doc, err)
++	}
++}
++
++func TestPreviewSaveNoOpAndConflict(t *testing.T) {
++	w, root := fileFixture(t)
++	in := fileWriteInput{Path: "docs/generated/ADR.md", Content: "# ADR\nDerived from main.go, tools.go and web/app.js.\n", ExpectedSHA256: "missing"}
++	preview, err := w.write(in, false)
++	if err != nil || preview.Saved || !preview.Changed || !strings.Contains(preview.Diff, "--- /dev/null") {
++		t.Fatalf("preview: %+v %v", preview, err)
++	}
++	if _, err = os.Stat(filepath.Join(root, in.Path)); !os.IsNotExist(err) {
++		t.Fatal("preview saved a file")
++	}
++	saved, err := w.write(in, true)
++	if err != nil || !saved.Saved || !saved.Changed || saved.Diff != preview.Diff {
++		t.Fatalf("save: %+v %v", saved, err)
++	}
++	data, _ := os.ReadFile(filepath.Join(root, in.Path))
++	if string(data) != in.Content {
++		t.Fatal("file was not persisted")
++	}
++	in.ExpectedSHA256 = saved.SHA256
++	again, err := w.write(in, true)
++	if err != nil || !again.Saved || again.Changed || again.Diff != "" {
++		t.Fatalf("repeat: %+v %v", again, err)
++	}
++	_ = os.WriteFile(filepath.Join(root, in.Path), []byte("Operator's edit\n"), 0600)
++	if _, err = w.write(in, true); err == nil || !strings.Contains(err.Error(), "file_conflict") {
++		t.Fatal("concurrent change overwritten")
++	}
++	data, _ = os.ReadFile(filepath.Join(root, in.Path))
++	if string(data) != "Operator's edit\n" {
++		t.Fatal("conflict lost operator content")
++	}
++}
++
++func TestFileWorkspaceRejectsSecretsSymlinksAndCodeWrites(t *testing.T) {
++	w, root := fileFixture(t)
++	_ = os.Symlink(filepath.Join(root, ".env"), filepath.Join(root, "docs", "leak.md"))
++	_ = os.MkdirAll(filepath.Join(root, ".local"), 0700)
++	_ = os.WriteFile(filepath.Join(root, ".local", "secret.md"), []byte("PRIVATE"), 0600)
++	_ = os.Symlink(filepath.Join(root, ".local"), filepath.Join(root, "docs", "linked"))
++	for _, p := range []string{".env", "docs/leak.md", "../README.md", "/etc/passwd", "docs/../README.md", "docs\\bad.md", ".local/secret.md", "docs/linked/secret.md"} {
++		if _, err := w.read(fileReadInput{Path: p}); err == nil {
++			t.Errorf("read allowed: %q", p)
++		}
++		if _, err := w.write(fileWriteInput{Path: p, Content: "x", ExpectedSHA256: "missing"}, true); err == nil {
++			t.Errorf("write allowed: %q", p)
++		}
++	}
++	if _, err := w.write(fileWriteInput{Path: "main.go", Content: "replace", ExpectedSHA256: "missing"}, true); err == nil {
++		t.Fatal("code write accepted")
++	}
++	listed, err := w.list(context.Background(), fileListInput{Limit: 200})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, p := range listed.Files {
++		if strings.Contains(p, "leak") || strings.Contains(p, "secret") || strings.Contains(p, "linked") {
++			t.Fatalf("private path listed: %q", p)
++		}
++	}
++}
++
++func TestFileToolsViaRealMCPWithSeparateWorkspace(t *testing.T) {
++	_, root := fileFixture(t)
++	knowledge := projectRoot(t)
++	token := strings.Repeat("f", 40)
++	h, err := Handler(Config{Root: knowledge, FilesRoot: root, Token: token})
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := httptest.NewServer(h)
++	defer server.Close()
++	ctx := context.Background()
++	session, err := mcp.NewClient(&mcp.Implementation{Name: "files-test", Version: "1"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: &http.Client{Transport: authRT{token}}, DisableStandaloneSSE: true}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer session.Close()
++	for name, args := range map[string]any{
++		"project_get_info":     map[string]any{},
++		"project_list_files":   fileListInput{},
++		"project_search_files": fileSearchInput{Query: "authenticate"},
++		"project_read_file":    fileReadInput{Path: "main.go"},
++		"project_write_file":   fileWriteInput{Path: "docs/new.md", Content: "# Saved through MCP\n", ExpectedSHA256: "missing"},
++	} {
++		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
++		if err != nil || result.IsError {
++			t.Fatalf("%s: %+v %v", name, result, err)
++		}
++		if name == "project_get_info" {
++			data, _ := json.Marshal(result.StructuredContent)
++			var info Info
++			_ = json.Unmarshal(data, &info)
++			if info.FileToolsVersion != 1 || info.FileWorkspace != filepath.Base(root) {
++				t.Fatalf("info: %+v", info)
++			}
++		}
++	}
++	if data, err := os.ReadFile(filepath.Join(root, "docs/new.md")); err != nil || string(data) != "# Saved through MCP\n" {
++		t.Fatalf("MCP save: %s %v", data, err)
++	}
++	if _, err := os.Stat(filepath.Join(knowledge, "docs/new.md")); !os.IsNotExist(err) {
++		t.Fatal("knowledge root was modified")
 +	}
 +}

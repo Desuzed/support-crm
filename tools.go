@@ -72,6 +72,9 @@ func (c *MCPClient) Call(ctx context.Context, name string, args, out any) (callE
 		}
 	}
 	if result.IsError {
+		if fileToolNames[name] && len(data) > 0 && len(data) < 1024 {
+			return errors.New("mcp_tool_failed: " + name + ": " + string(data))
+		}
 		return errors.New("mcp_tool_failed: " + name)
 	}
 	if err != nil || len(data) == 0 {
@@ -167,7 +170,11 @@ func NewCRM(ctx context.Context, store *Store) (*MCPClient, error) {
 		if in.Role != "user" && in.Role != "assistant" && in.Role != "operator" {
 			return nil, SavedMessage{}, errors.New("invalid role")
 		}
-		if strings.TrimSpace(in.Content) == "" || len(in.Content) > 30000 {
+		limit := 30000
+		if in.Role == "assistant" {
+			limit = 512 << 10
+		} // Includes up to four full document diffs.
+		if strings.TrimSpace(in.Content) == "" || len(in.Content) > limit {
 			return nil, SavedMessage{}, errors.New("invalid message")
 		}
 		id, e := store.AppendMessage(ctx, in.ID, in.Role, in.Content, in.Sources, in.Trace)

@@ -210,7 +210,7 @@ func (a *App) handler() http.Handler {
 			respond(w, 429, map[string]string{"error": "Сервис занят. Повторите запрос позже"})
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 		defer cancel()
 		reply, err := a.Assistant.Ask(ctx, in.TicketID, in.Question)
 		if err != nil {

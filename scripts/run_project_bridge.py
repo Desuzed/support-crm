@@ -21,6 +21,7 @@ def values(path):
 
 settings = values(support / '.env')
 os.environ['SUPPORT_MCP_TOKEN'] = settings['PROJECT_MCP_TOKEN']
+os.environ['SUPPORT_FILES_ROOT'] = settings.get('SUPPORT_FILES_ROOT') or str(project)
 project_settings = values(project / '.env')
 for name in ('DEEPSEEK_API_KEY', 'GITHUB_TOKEN'):
     if name not in os.environ and project_settings.get(name):
