@@ -92,8 +92,13 @@ func (a *Assistant) Ask(ctx context.Context, ticketID, question string) (reply R
 	defer closeProject()
 	reply.Trace.Project = "connected"
 	var info map[string]any
-	if err := project.Call(ctx, "project_get_info", map[string]any{}, &info); err == nil && (ticketID != "" || diagnosticsQuestion(question)) {
-		evidence = append(evidence, Evidence{ID: "project:info", Source: "Project MCP · текущая диагностика", Kind: "diagnostic", Text: marshal(info)})
+	if err := project.Call(ctx, "project_get_info", map[string]any{}, &info); err == nil {
+		if ticketID != "" || diagnosticsQuestion(question) {
+			evidence = append(evidence, Evidence{ID: "project:info", Source: "Project MCP · текущая диагностика", Kind: "diagnostic", Text: marshal(info)})
+		}
+		if version, _ := info["fileToolsVersion"].(float64); version >= 1 {
+			return a.askWithFiles(ctx, project, ticketID, question, info, evidence, history, reply)
+		}
 	}
 	searchQuestion := question
 	if ticketID != "" {

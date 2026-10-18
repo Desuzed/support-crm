@@ -51,7 +51,7 @@ function renderMessage(message) {
   }
   if (message.trace) {
     const t = message.trace;
-    const mode = t.retrieval === 'rag' ? 'RAG' : t.retrieval === 'direct_documents' ? 'Чтение документов · RAG недоступен или не дал результатов' : 'Документы не получены';
+    const mode = t.retrieval === 'project_files' ? 'Файлы проекта' : t.retrieval === 'rag' ? 'RAG' : t.retrieval === 'direct_documents' ? 'Прямое чтение документов' : 'Документы не получены';
     node.append(el('div', 'trace', `${t.model} · ${mode} · ${t.crm === 'mcp' ? 'CRM MCP · ' : ''}${(t.durationMs / 1000).toFixed(1)} с`));
     node.append(renderMCPJournal(t));
   }
@@ -65,6 +65,11 @@ function callPurpose(call) {
     project_get_info: 'Версия проекта и готовность RAG-индекса',
     project_search_docs: 'Поиск фрагментов по RAG проекта',
     project_read_document: 'Прямое чтение документа — резервный путь',
+    project_list_files: 'Поиск файлов ai-challenge-app',
+    project_search_files: 'Поиск использований по текущим файлам',
+    project_read_file: 'Чтение исходного кода или документации',
+    project_write_file: 'Сохранение документа и получение diff',
+    project_preview_diff: 'Подготовка diff без сохранения файла',
   };
   if (call.tool === 'crm_add_message') return call.arguments?.role === 'assistant' ? 'Сохранение ответа в CRM' : 'Сохранение вопроса в CRM';
   return purposes[call.tool] || 'Вызов инструмента MCP';
@@ -151,7 +156,7 @@ async function selectTicket(id) {
 function setView(view) {
   state.view = view; notice();
   for (const key of ['tickets', 'general', 'users']) { $('nav-' + key).classList.toggle('active', key === view); $(key === 'tickets' ? 'ticket-view' : key + '-view').hidden = key !== view; }
-  const content = {tickets: ['Обращения', 'Каждое обращение — в контексте.', 'История пользователя, документация проекта и проверяемые ответы.'], general: ['База знаний', 'Проект отвечает на ваши вопросы.', 'Ответы по документации и коду, доступным через MCP на Mac.'], users: ['Пользователи', 'Люди и их контекст.', 'Пользователи проекта и связанные с ними обращения.']}[view];
+  const content = {tickets: ['Обращения', 'Каждое обращение — в контексте.', 'История пользователя, документация проекта и проверяемые ответы.'], general: ['База знаний', 'Проект отвечает на ваши вопросы.', 'Ответы и работа с файлами ai-challenge-app через MCP на Mac.'], users: ['Пользователи', 'Люди и их контекст.', 'Пользователи проекта и связанные с ними обращения.']}[view];
   $('page-name').textContent = content[0]; $('page-title').textContent = content[1]; $('page-subtitle').textContent = content[2]; $('new-ticket').hidden = view !== 'tickets';
   if (view === 'users') loadUsers().catch(e => notice(e.message));
 }
@@ -224,7 +229,7 @@ $('ticket-chat').addEventListener('submit', async event => {
 $('general-chat').addEventListener('submit', async event => {
   event.preventDefault(); const question = $('general-question').value.trim(); if (!question || state.busy.has('general')) return;
   state.busy.add('general'); updateBusy(); notice(); state.general.push({role: 'user', content: question, createdAt: new Date().toISOString()}); renderMessages($('general-messages'), state.general); $('general-question').value = '';
-  const pending = el('p', 'chat-progress', 'Ищу документы на Mac и готовлю ответ DeepSeek…'); $('general-messages').append(pending);
+  const pending = el('p', 'chat-progress', 'Изучаю проект и выполняю задачу…'); $('general-messages').append(pending);
   try { const result = await api('/api/chat', {method: 'POST', body: JSON.stringify({question})}); state.general.push({role: 'assistant', content: result.answer, sources: result.sources, trace: result.trace, createdAt: new Date().toISOString()}); }
   catch (error) { notice(error.message); state.general.push({role: 'assistant', content: error.message, trace:error.trace, createdAt: new Date().toISOString()}); }
   finally { state.busy.delete('general'); updateBusy(); renderMessages($('general-messages'), state.general); }
